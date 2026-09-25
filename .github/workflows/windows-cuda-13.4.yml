@@ -2,9 +2,9 @@ name: Build Windows CUDA 13.4
 
 on:
   workflow_dispatch:
-  push:
+  pull_request:
     branches:
-      - feature/windows-cuda-13-4-workflow
+      - master
     paths:
       - .github/workflows/windows-cuda-13.4.yml
 
