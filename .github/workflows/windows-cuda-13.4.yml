@@ -1,0 +1,151 @@
+name: Build Windows CUDA 13.4
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ui-build:
+    uses: ./.github/workflows/ui-build.yml
+
+  windows-cuda-13-4:
+    name: Windows x64 / CUDA 13.4
+    needs: ui-build
+    runs-on: windows-2022
+
+    env:
+      CUDA_ROOT: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download UI build
+        uses: actions/download-artifact@v7
+        with:
+          name: llama-ui.zip
+          path: tools/ui/dist
+
+      - name: Install Ninja
+        shell: pwsh
+        run: choco install ninja -y
+
+      - name: Install CUDA 13.4 x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $base = "https://packages.nvidia.com/bin-archive/pool/windows-x86_64/5B515474-7E78-11F1-8656-C51E4F4B317F"
+          $packages = @(
+            "cccl-windows-x86_64-13.3.4.1.2-archive.zip",
+            "cuda_crt-windows-x86_64-13.4.46-archive.zip",
+            "cuda_cudart-windows-x86_64-13.4.46-archive.zip",
+            "cuda_nvcc-windows-x86_64-13.4.46-archive.zip",
+            "cuda_nvrtc-windows-x86_64-13.4.46-archive.zip",
+            "libcublas-windows-x86_64-13.7.0.10-archive.zip",
+            "libnvvm-windows-x86_64-13.4.46-archive.zip"
+          )
+
+          New-Item -ItemType Directory -Force -Path $env:CUDA_ROOT | Out-Null
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\cuda-packages" | Out-Null
+
+          foreach ($package in $packages) {
+            $zip = Join-Path "$env:RUNNER_TEMP\cuda-packages" $package
+            $extract = Join-Path "$env:RUNNER_TEMP\cuda-packages" ([IO.Path]::GetFileNameWithoutExtension($package))
+
+            Write-Host "Downloading $package"
+            Invoke-WebRequest -Uri "$base/$package" -OutFile $zip
+            Expand-Archive -Path $zip -DestinationPath $extract -Force
+
+            $root = Get-ChildItem -Path $extract -Directory | Select-Object -First 1
+            if (-not $root) {
+              throw "Unable to find extracted root directory for $package"
+            }
+
+            Copy-Item -Path "$($root.FullName)\*" -Destination $env:CUDA_ROOT -Recurse -Force
+          }
+
+          "$env:CUDA_ROOT\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CUDA_PATH=$env:CUDA_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CUDA_PATH_V13_4=$env:CUDA_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          & "$env:CUDA_ROOT\bin\nvcc.exe" --version
+
+      - name: Configure
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_CUDA=ON ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            -DLLAMA_BUILD_EXAMPLES=OFF ^
+            -DLLAMA_BUILD_TESTS=OFF ^
+            -DLLAMA_BUILD_TOOLS=ON ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DGGML_RPC=ON
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          if %NINJA_JOBS% LSS 1 set NINJA_JOBS=1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      - name: Bundle CUDA runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dest = ".\build\bin\Release"
+
+          if (-not (Test-Path "$dest\llama-server.exe")) {
+            throw "llama-server.exe was not produced"
+          }
+          if (-not (Test-Path "$dest\ggml-cuda.dll")) {
+            throw "ggml-cuda.dll was not produced"
+          }
+
+          $patterns = @(
+            "cudart64_*.dll",
+            "cublas64_*.dll",
+            "cublasLt64_*.dll",
+            "nvrtc64_*.dll",
+            "nvrtc-builtins64_*.dll"
+          )
+
+          foreach ($pattern in $patterns) {
+            $matches = Get-ChildItem -Path "$env:CUDA_ROOT\bin" -Filter $pattern -ErrorAction SilentlyContinue
+            foreach ($file in $matches) {
+              Copy-Item $file.FullName -Destination $dest -Force
+            }
+          }
+
+          Copy-Item LICENSE $dest -Force
+
+          Write-Host "Package contents:"
+          Get-ChildItem $dest | Sort-Object Name | Format-Table Name, Length -AutoSize
+
+      - name: Pack
+        shell: pwsh
+        run: |
+          $archive = "llama-K2-win-cuda-13.4-x64.zip"
+          if (Test-Path $archive) {
+            Remove-Item $archive -Force
+          }
+
+          7z a -snl $archive ".\build\bin\Release\*"
+          if ($LASTEXITCODE -ne 0) {
+            throw "7z failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-K2-win-cuda-13.4-x64
+          path: llama-K2-win-cuda-13.4-x64.zip
+          if-no-files-found: error
+          compression-level: 0
