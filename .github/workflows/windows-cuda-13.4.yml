@@ -132,10 +132,35 @@ jobs:
             "nvrtc-builtins64_*.dll"
           )
 
-          foreach ($pattern in $patterns) {
-            $matches = Get-ChildItem -Path "$env:CUDA_ROOT\bin" -Filter $pattern -ErrorAction SilentlyContinue
-            foreach ($file in $matches) {
-              Copy-Item $file.FullName -Destination $dest -Force
+          $runtimeDirs = @(
+            "$env:CUDA_ROOT\bin",
+            "$env:CUDA_ROOT\bin\x64",
+            "$env:CUDA_ROOT\lib"
+          )
+
+          foreach ($runtimeDir in $runtimeDirs) {
+            if (-not (Test-Path $runtimeDir)) {
+              continue
+            }
+
+            foreach ($pattern in $patterns) {
+              Get-ChildItem -Path $runtimeDir -Filter $pattern -File -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                  Write-Host "Bundling $($_.FullName)"
+                  Copy-Item $_.FullName -Destination $dest -Force
+                }
+            }
+          }
+
+          $requiredRuntime = @(
+            "cudart64_*.dll",
+            "cublas64_*.dll",
+            "cublasLt64_*.dll"
+          )
+
+          foreach ($pattern in $requiredRuntime) {
+            if (-not (Get-ChildItem -Path $dest -Filter $pattern -File -ErrorAction SilentlyContinue)) {
+              throw "Required CUDA runtime DLL matching '$pattern' was not bundled"
             }
           }
 
